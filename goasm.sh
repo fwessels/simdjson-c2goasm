@@ -1,0 +1,7 @@
+c2goasm cpp/finalize_structurals.s finalize_structurals_amd64.s
+c2goasm cpp/find_odd_backslash_sequences.s find_odd_backslash_sequences_amd64.s
+c2goasm cpp/find_quote_mask_and_bits.s find_quote_mask_and_bits_amd64.s
+c2goasm cpp/find_whitespace_and_structurals.s find_whitespace_and_structurals_amd64.s
+c2goasm cpp/flatten_bits.s flatten_bits_amd64.s
+c2goasm cpp/parse_number.s parse_number_amd64.s
+c2goasm cpp/parse_string.s parse_string_amd64.s
