@@ -121,7 +121,7 @@ static const uint8_t escape_map[256] = {
 // dest will advance a variable amount (return via pointer)
 // return true if the unicode codepoint was valid
 // We work in little-endian then swap at write time
-static inline bool handle_unicode_codepoint(const uint8_t **src_ptr, uint8_t **dst_ptr) {
+static inline bool handle_unicode_codepoint(const uint8_t **src_ptr, uint8_t **dst_ptr, bool quote_within_twelve) {
   // hex_to_u32_nocheck fills high 16 bits of the return value with 1s if the
   // conversion isn't valid; we defer the check for this to inside the
   // multilingual plane check
@@ -130,7 +130,7 @@ static inline bool handle_unicode_codepoint(const uint8_t **src_ptr, uint8_t **d
   // check for low surrogate for characters outside the Basic
   // Multilingual Plane.
   if (code_point >= 0xd800 && code_point < 0xdc00) {
-    if (((*src_ptr)[0] != '\\') || (*src_ptr)[1] != 'u') {
+    if (quote_within_twelve || ((*src_ptr)[0] != '\\') || (*src_ptr)[1] != 'u') {
       return false;
     }
     uint32_t code_point_2 = hex_to_u32_nocheck(*src_ptr + 2);
@@ -202,7 +202,24 @@ bool parse_string(const uint8_t *src, uint8_t *dst, uint8_t **pcurrent_string_bu
         // within the unicode codepoint handling code.
         src += bs_dist;
         dst += bs_dist;
-        if (!handle_unicode_codepoint(&src, &dst)) {
+        uint32_t quote_dist = 32;
+        if (quote_bits != 0) {
+          quote_dist = trailingzeroes(quote_bits);
+        } else if (bs_dist > 32 - 12) {
+          // the 6 + 6 byte unicode sequences can escape to the next YMM word,
+          // so reload with shift and recheck for possibly premature quote
+          uint32_t shift = bs_dist - 20;
+          __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src-bs_dist+shift));
+          auto quote_mask = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('"'));
+          auto quote_bits = static_cast<uint32_t>(_mm256_movemask_epi8(quote_mask));
+          if (quote_bits != 0) {
+            quote_dist = trailingzeroes(quote_bits);
+          }
+          quote_dist += shift;
+        }
+        bool quote_within_six = (quote_dist - bs_dist < 6); // is there a quote within six bytes
+        bool quote_within_twelve = (quote_dist - bs_dist < 12); // is there a quote within twelve bytes
+        if (quote_within_six || !handle_unicode_codepoint(&src, &dst, quote_within_twelve)) {
 #ifdef JSON_TEST_STRINGS // for unit testing
           foundBadString(buf + offset);
 #endif // JSON_TEST_STRINGS
