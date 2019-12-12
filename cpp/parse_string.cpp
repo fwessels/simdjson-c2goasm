@@ -18,7 +18,9 @@ static inline int trailingzeroes(uint64_t input_num) {
 #endif
 }
 
-#define memcpy(DEST,SRC,SIZE) for (int ii = 0; ii < SIZE; ii++) { ((uint8_t *)DEST)[ii] = ((uint8_t *)SRC)[ii]; }
+/*
+ * #define memcpy(DEST,SRC,SIZE) for (int ii = 0; ii < SIZE; ii++) { ((uint8_t *)DEST)[ii] = ((uint8_t *)SRC)[ii]; }
+ */
 
 const signed char digittoval[256] = {
     -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
@@ -62,27 +64,39 @@ static inline uint32_t hex_to_u32_nocheck(const uint8_t *src) {// strictly speak
 //
 // Note: we assume that surrogates are treated separately
 //
+#ifdef VALIDATE_ONLY
+inline size_t codepoint_to_utf8(uint32_t cp) {
+#else
 inline size_t codepoint_to_utf8(uint32_t cp, uint8_t *c) {
+#endif
   if (cp <= 0x7F) {
+#ifndef VALIDATE_ONLY
     c[0] = cp;
+#endif
     return 1; // ascii
   } if (cp <= 0x7FF) {
+#ifndef VALIDATE_ONLY
     c[0] = (cp >> 6) + 192;
     c[1] = (cp & 63) + 128;
+#endif
     return 2; // universal plane
   //  Surrogates are treated elsewhere...
   //} //else if (0xd800 <= cp && cp <= 0xdfff) {
   //  return 0; // surrogates // could put assert here
   } else if (cp <= 0xFFFF) {
+#ifndef VALIDATE_ONLY
     c[0] = (cp >> 12) + 224;
     c[1] = ((cp >> 6) & 63) + 128;
     c[2] = (cp & 63) + 128;
+#endif
     return 3;
   } else if (cp <= 0x10FFFF) { // if you know you have a valid code point, this is not needed
+#ifndef VALIDATE_ONLY
     c[0] = (cp >> 18) + 240;
     c[1] = ((cp >> 12) & 63) + 128;
     c[2] = ((cp >> 6) & 63) + 128;
     c[3] = (cp & 63) + 128;
+#endif
     return 4;
   }
   // will return 0 when the code point was too large.
@@ -148,18 +162,30 @@ static inline bool handle_unicode_codepoint(const uint8_t **src_ptr, uint8_t **d
         (((code_point - 0xd800) << 10) | (code_point_2 - 0xdc00)) + 0x10000;
     *src_ptr += 6;
   }
+#ifdef VALIDATE_ONLY
+  size_t offset = codepoint_to_utf8(code_point);
+#else
   size_t offset = codepoint_to_utf8(code_point, *dst_ptr);
+#endif
   *dst_ptr += offset;
   return offset > 0;
 }
 
-bool parse_string(const uint8_t *src, uint8_t *dst, uint8_t **pcurrent_string_buf_loc) {
+#ifdef VALIDATE_ONLY
+bool parse_string_validate_only(const uint8_t *src, uint64_t *src_length, uint64_t *dst_length) {
+  uint8_t *dst = NULL;
+  const uint8_t *const start_of_src = src;
+#else
+uint64_t parse_string(const uint8_t *src, uint8_t *dst, uint8_t **pcurrent_string_buf_loc) {
+#endif
   const uint8_t *const start_of_string = dst;
   while (1) {
     __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(src));
+#ifndef VALIDATE_ONLY
     // store to dest unconditionally - we can overwrite the bits we don't like
     // later
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), v);
+#endif
     auto bs_bits =
         static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, _mm256_set1_epi8('\\'))));
     auto quote_mask = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('"'));
@@ -171,25 +197,35 @@ bool parse_string(const uint8_t *src, uint8_t *dst, uint8_t **pcurrent_string_bu
       // find out where the quote is...
       uint32_t quote_dist = trailingzeroes(quote_bits);
 
-      // NULL termination is still handy if you expect all your strings to be NULL terminated?
-      // It comes at a small cost
-      dst[quote_dist] = 0;
+#ifdef VALIDATE_ONLY
+       *src_length = (src - start_of_src) + quote_dist;
+       *dst_length = (dst - start_of_string) + quote_dist;
+#else
+      /* simdjson-go: golang doesn't string termination, so skip this
+       *
+       * // NULL termination is still handy if you expect all your strings to be NULL terminated?
+       * // It comes at a small cost
+       * dst[quote_dist] = 0;
+       */
 
-      uint32_t str_length = (dst - start_of_string) + quote_dist;
-      memcpy(*pcurrent_string_buf_loc,&str_length, sizeof(uint32_t));
+      /* simdjson-go: size of string goes onto the tape, so don't store in buffer
+       *
+       * uint32_t str_length = (dst - start_of_string) + quote_dist;
+       * memcpy(*pcurrent_string_buf_loc,&str_length, sizeof(uint32_t));
+       */
       ///////////////////////
       // Above, check for overflow in case someone has a crazy string (>=4GB?)
       // But only add the overflow check when the document itself exceeds 4GB
       // Currently unneeded because we refuse to parse docs larger or equal to 4GB.
       ////////////////////////
 
-
-      // we advance the point, accounting for the fact that we have a NULl termination
-      *pcurrent_string_buf_loc = dst + quote_dist + 1;
+      // we advance the point, accounting for the fact that we have a NULL termination
+      *pcurrent_string_buf_loc = dst + quote_dist /* + 1 */;
 
 #ifdef JSON_TEST_STRINGS // for unit testing
       foundString(buf + offset,start_of_string,pj.current_string_buf_loc - 1);
 #endif // JSON_TEST_STRINGS
+#endif // VALIDATE_ONLY
       return true;
     }
     if(((quote_bits - 1) & bs_bits ) != 0 ) {
@@ -237,7 +273,9 @@ bool parse_string(const uint8_t *src, uint8_t *dst, uint8_t **pcurrent_string_bu
 #endif // JSON_TEST_STRINGS
           return false; // bogus escape value is an error
         }
+#ifndef VALIDATE_ONLY
         dst[bs_dist] = escape_result;
+#endif
         src += bs_dist + 2;
         dst += bs_dist + 1;
       }
